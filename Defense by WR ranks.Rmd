@@ -1,0 +1,141 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+library(arrow)
+library(tidyverse)
+library(tictoc)
+library(brms)
+library(bayesplot)
+library(ggrepel)
+library(nflfastR)
+library(ggthemes)
+library(ggimage)
+color_scheme_set("orange")
+options(mc.cores = parallel::detectCores())
+
+ds <- open_dataset("nflfastr", partitioning = "year")
+
+ds %>% 
+  select(desc, name, epa, receiver, receiver_id, posteam, defteam, season) %>%
+  filter(season == 2020) %>%
+  collect() -> pbp
+```
+
+```{r}
+glimpse(pbp)
+```
+
+```{r}
+pbp %>%
+  filter(!is.na(receiver_id), !is.na(epa)) -> d
+
+d %>%
+  glimpse()
+```
+
+```{r}
+d %>%
+  group_by(receiver_id) %>%
+  mutate(total_epa = sum(epa)) %>%
+  ungroup() -> d2
+
+d2 %>%
+  glimpse()
+```
+
+```{r}
+d2 %>%
+  distinct(receiver_id, .keep_all = T) %>%
+  group_by(posteam) %>%
+  mutate(rank = order(order(total_epa, decreasing = T))) %>%
+  ungroup() %>%
+  select(receiver_id, rank)-> d3
+
+left_join(d3,d2, by = "receiver_id") -> d3.1
+
+```
+
+```{r}
+d3.1 %>%
+  select(epa, receiver, receiver_id, defteam, rank) %>%
+  mutate(epa = (epa - mean(epa)) / sd(epa)) -> d4
+
+d4 %>% 
+  filter(rank <= 5) -> d4.1
+
+get_prior(data = d4,
+          family = gaussian,
+          formula = epa ~ 1 + receiver_id + (1|defteam:rank))
+```
+
+```{r}
+brm(data = d4.1,
+    family = gaussian,
+    formula = epa ~ 1 + receiver_id + (1|defteam:rank),
+    prior = c(prior(normal(0,1), class = b),
+              prior(normal(0,1), class = Intercept),
+              prior(cauchy(0,1), class = sd),
+              prior(cauchy(0,1), class = sigma)),
+    cores = 4, chains = 4, iter = 8000, file = "WRs_ranked_EPA_by_defteam") -> WRs_ranked_EPA_by_defteam
+beepr::beep(sound = 3)
+```
+
+```{r}
+summary(WRs_ranked_EPA_by_defteam)
+
+d4.1 %>%
+  group_by(defteam, rank) %>%
+  summarise(defteam = last(defteam),
+            rank = last(rank)) %>%  
+  ungroup()-> teams
+
+ranef(WRs_ranked_EPA_by_defteam)$defteam %>% as_tibble -> output1
+
+bind_cols(teams, output1) -> output2
+
+```
+
+```{r}
+output2 %>%
+  mutate(epa_allowed = Estimate.Intercept * sd(d2$epa) + mean(d2$epa)) %>%
+    select(defteam, rank, epa_allowed) -> output3
+
+```
+
+```{r}
+output4 <- output3 %>%
+  left_join(teams_colors_logos, by = c('defteam' = 'team_abbr'))
+
+output4 %>%
+  ggplot(aes(x =rank, y = epa_allowed, group = defteam)) +
+  geom_point(color = output4$team_color) +
+  geom_line(color = output4$team_color, alpha = 0.3) +
+geom_image(data = subset(output4, defteam == "MIN"), aes(image = team_logo_espn), size = 1/15, asp = 16 / 9) +
+  labs(x = "WR number",
+       y = "EPA allowed per target",
+       title = "Pass Defense 2020",
+       subtitle = "\nOpponents' value of targeting their top five receivers\n",
+       caption = "Data: @nflfastR") +
+  theme_economist_white(gray_bg = F, horizontal = F) +
+  #center title
+  theme(
+    aspect.ratio = 9 / 16,
+    plot.title = element_text(size = 14, hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(size = 10, hjust = 0.5),
+    axis.title.y = element_text(vjust= 4,),
+    axis.title.x = element_text(vjust= -0.5)
+  ) +
+  #make ticks look nice
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10)) +
+  scale_y_reverse()
+
+
+```
+
+```{r}
+ggsave(filename = "Vikings.png", dpi = 1000, height = 7 * 9/16) 
+```
